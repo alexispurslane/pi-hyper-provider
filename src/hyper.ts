@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 
 const require = createRequire(import.meta.url);
 const packageJsonPayload: unknown = require("../package.json");

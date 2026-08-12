@@ -1,5 +1,7 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { readStoredCredential } from "@earendil-works/pi-coding-agent";
+import { Database } from "bun:sqlite";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { Type } from "typebox";
 import { fetchJson, HttpNetworkError, HttpResponseError, HttpTimeoutError } from "./http.js";
 import { HYPER_API_BASE_URL, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
@@ -54,10 +56,15 @@ function teamNameStatusText(statusItems: HyperStatusItems, teamName: string | un
 }
 
 function storedTeamName(): string | undefined {
-	const credential = readStoredCredential(PROVIDER_NAME);
-	if (credential?.type !== "oauth") return undefined;
-	const teamName = credential.teamName;
-	return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
+	const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+	try {
+		const credential = store.listAuthCredentials(PROVIDER_NAME)[0]?.credential;
+		if (credential?.type !== "oauth") return undefined;
+		const teamName = credential.orgName;
+		return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
+	} finally {
+		store.close();
+	}
 }
 
 export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void {
@@ -243,8 +250,11 @@ export function registerCreditStatus(pi: ExtensionAPI, warn: WarningSink): void 
 		refreshInBackground(ctx);
 	});
 
-	pi.on("model_select", (event, ctx) => {
-		refreshInBackground(ctx, event.model);
+	// OMP has no `model_select` event; `turn_start` fires per turn with the
+	// current model in ctx, so it preserves the "refresh when a Hyper model is
+	// active" behavior. `isHyperModel` guards against non-Hyper turns.
+	pi.on("turn_start", (_event, ctx) => {
+		refreshInBackground(ctx, ctx.model);
 	});
 
 	pi.on("message_end", (event, ctx) => {

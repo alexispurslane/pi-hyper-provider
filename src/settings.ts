@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { hyperProviderDir } from "./hyper.js";

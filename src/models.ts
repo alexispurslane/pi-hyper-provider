@@ -1,32 +1,22 @@
-import type { Model, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import type { ProviderModelConfig } from "@oh-my-pi/pi-coding-agent";
+import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type Static, Type } from "typebox";
 import { fetchJson } from "./http.js";
-import { HYPER_API_BASE_URL, HYPER_USER_AGENT, PROVIDER_NAME } from "./hyper.js";
+import { HYPER_API_BASE_URL, HYPER_USER_AGENT } from "./hyper.js";
 import { parseSchema } from "./schema.js";
 
 const MODEL_FETCH_TIMEOUT_MS = 3_000;
 
-const PI_THINKING_LEVELS = [
+// `Effort` is a const-enum (not a string-union); the level names are its wire values.
+const PI_EFFORTS: readonly Effort[] = [
 	"minimal",
 	"low",
 	"medium",
 	"high",
 	"xhigh",
 	"max",
-] as const satisfies readonly ThinkingLevel[];
-// Hyper models without reasoning levels are on/off-only. Use Pi's max level as
-// the single representative "on" state (boolean on means maximum effort); the
-// deepseek compat switch we turn on later ends up dropping efforts and
-// translating off as disabled and any other level as enabled.
-const ON_OFF_THINKING_LEVEL_MAP: ThinkingLevelMap = {
-	off: "off",
-	minimal: null,
-	low: null,
-	medium: null,
-	high: null,
-	xhigh: null,
-	max: "max",
-};
+] as unknown as readonly Effort[];
 
 const ProviderModelSchema = Type.Object(
 	{
@@ -55,56 +45,78 @@ const ProviderPayloadSchema = Type.Object(
 
 type ProviderModel = Static<typeof ProviderModelSchema>;
 
-function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
+function toProviderModel(model: ProviderModel): ProviderModelConfig {
 	const input: ("text" | "image")[] = model.supports_attachments ? ["text", "image"] : ["text"];
 	const reasoningLevels = model.reasoning_levels ?? [];
 	const supportsReasoningEffort = reasoningLevels.length > 0;
-	const thinkingLevelMap = supportsReasoningEffort
-		? buildThinkingLevelMap(reasoningLevels)
-		: model.can_reason
-			? ON_OFF_THINKING_LEVEL_MAP
-			: undefined;
+	const thinking = buildThinkingConfig(model, reasoningLevels, supportsReasoningEffort);
 
 	return {
 		id: model.id,
 		name: model.name,
 		api: "openai-completions",
-		provider: PROVIDER_NAME,
-		baseUrl: HYPER_API_BASE_URL,
-		headers: { "User-Agent": HYPER_USER_AGENT },
 		reasoning: model.can_reason,
-		thinkingLevelMap,
+		thinking,
 		input,
 		cost: {
 			input: model.cost_per_1m_in,
 			output: model.cost_per_1m_out,
-			cacheRead: model.cost_per_1m_out_cached,
+			cacheRead: model.cost_per_1m_out_cached ?? 0,
 			cacheWrite: model.cost_per_1m_in_cached,
 		},
 		contextWindow: model.context_window,
 		maxTokens: model.default_max_tokens,
+		headers: { "User-Agent": HYPER_USER_AGENT },
 		compat: {
 			supportsStore: false,
 			supportsReasoningEffort,
-			thinkingFormat: "deepseek",
+			thinkingFormat: "openai",
 			maxTokensField: "max_tokens",
 		},
 	};
 }
 
-function buildThinkingLevelMap(levels: string[]): ThinkingLevelMap | undefined {
-	if (levels.length === 0) return undefined;
-	const availableLevels = new Set<string>(levels);
-	const result: ThinkingLevelMap = {
-		off: availableLevels.has("off") ? "off" : null,
-	};
-	for (const level of PI_THINKING_LEVELS) {
-		result[level] = availableLevels.has(level) ? level : null;
+/**
+ * Build OMP's ThinkingConfig for a Hyper model.
+ *
+ * Hyper models with reasoning levels expose those levels as pi efforts; models
+ * without levels are on/off-only, represented by a single max effort (on means
+ * maximum effort, matching upstream pi's on/off handling).
+ */
+function buildThinkingConfig(
+	model: ProviderModel,
+	reasoningLevels: string[],
+	supportsReasoningEffort: boolean,
+): ThinkingConfig | undefined {
+	if (!model.can_reason) return undefined;
+
+	const available = new Set(reasoningLevels);
+	const efforts = supportsReasoningEffort
+		? (PI_EFFORTS.filter(level => available.has(level)) as Effort[])
+		: (["max"] as unknown as Effort[]);
+
+	if (efforts.length === 0) return undefined;
+
+	const effortMap: Partial<Record<Effort, string>> = {};
+	for (const effort of efforts) {
+		effortMap[effort] = effort;
 	}
-	return result;
+
+	const config: ThinkingConfig = {
+		mode: "effort",
+		efforts,
+		effortMap,
+	};
+	const defaultReasoningEffort = model.default_reasoning_effort;
+	if (defaultReasoningEffort) {
+		const isKnownLevel = (PI_EFFORTS as readonly string[]).includes(defaultReasoningEffort);
+		const defaultLevel = isKnownLevel ? (defaultReasoningEffort as Effort) : ("max" as unknown as Effort);
+		config.defaultLevel = defaultLevel;
+	}
+	return config;
 }
 
-export async function fetchHyperModels(signal?: AbortSignal): Promise<Model<"openai-completions">[]> {
+export async function fetchHyperModels(signal?: AbortSignal): Promise<ProviderModelConfig[]> {
 	const payload = await fetchJson(`${HYPER_API_BASE_URL}/provider`, {
 		signal,
 		timeoutMs: MODEL_FETCH_TIMEOUT_MS,
